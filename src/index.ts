@@ -1,9 +1,11 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { connect } from "cloudflare:sockets";
 
 type DriversnoteEnv = Env & {
   DRIVERSNOTE_API_KEY: string;
+  ORANGE_MAIL_PASSWORD: string;
 };
 
 async function driversnoteRequest(
@@ -97,6 +99,94 @@ export class MyMCP extends McpAgent<DriversnoteEnv> {
       }
     );
 
+    this.server.tool(
+     "list_orange_emails",
+      "Lire les 5 derniers e-mails de la boîte Orange CGA sans rien modifier.",
+{},
+async () => {
+  const socket = connect(
+  { hostname: "imap.orange.fr", port: 993 },
+  { secureTransport: "on" }
+);
+  await socket.opened;
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+const reader = socket.readable.getReader();
+const writer = socket.writable.getWriter();
+
+async function readUntil(tag: string) {
+  let result = "";
+
+  while (
+    !result.includes(`${tag} OK`) &&
+    !result.includes(`${tag} NO`) &&
+    !result.includes(`${tag} BAD`)
+  ) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    result += decoder.decode(value);
+  }
+
+  return result;
+}
+
+// Message d'accueil Orange
+await reader.read();
+
+await writer.write(
+  encoder.encode(
+    `A001 LOGIN "cga.2b@orange.fr" "${this.env.ORANGE_MAIL_PASSWORD}"\r\n`
+  )
+);
+await readUntil("A001");
+
+await writer.write(encoder.encode("A002 SELECT INBOX\r\n"));
+await readUntil("A002");
+
+await writer.write(encoder.encode("A003 SEARCH ALL\r\n"));
+const searchResult = await readUntil("A003");
+
+const searchLine =
+  searchResult
+    .split("\r\n")
+    .find((line) => line.startsWith("* SEARCH ")) ?? "";
+
+const ids = searchLine
+  .replace("* SEARCH ", "")
+  .trim()
+  .split(/\s+/)
+  .filter(Boolean)
+  .slice(-5);
+  if (ids.length === 0) {
+  await writer.write(encoder.encode("A004 LOGOUT\r\n"));
+  return {
+    content: [{ type: "text", text: "Aucun e-mail trouvé." }],
+  };
+}
+
+await writer.write(
+  encoder.encode(
+    `A004 FETCH ${ids.join(",")} (BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])\r\n`
+  )
+);
+
+const emails = await readUntil("A004");
+
+await writer.write(encoder.encode("A005 LOGOUT\r\n"));
+
+return {
+  content: [
+    {
+      type: "text",
+      text: emails,
+    },
+  ],
+};
+}
+);
+      
+  
     this.server.tool(
       "update_driversnote_trip",
       "Modifier le motif d'un trajet Driversnote. Utiliser seulement après avoir identifié le déplacement professionnel et obtenu confirmation de l'utilisateur.",
